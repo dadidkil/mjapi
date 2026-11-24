@@ -42,19 +42,21 @@ class DiscordBridge {
     `);
   }
   async prepareStorage(){
+    let stage='archive.inspect';
+    try{
     // Retain an independently verified backup before changing existing archive bodies.
     const duplicate='EXISTS (SELECT 1 FROM discord_messages m WHERE m.id=v.message_row AND m.version=v.version AND m.body=v.body AND m.changed_at=v.at)';
     const copies=!!this.store.db.prepare(`SELECT 1 FROM discord_message_versions v WHERE ${duplicate} LIMIT 1`).get();
     const initialized=this.store.getState(COMPRESSION_STATE,0)===1;
     const legacy=!initialized&&(this.store.db.prepare("SELECT 1 FROM discord_messages WHERE typeof(body)='text' LIMIT 1").get()||this.store.db.prepare("SELECT 1 FROM discord_message_versions WHERE typeof(body)='text' LIMIT 1").get());
     if(!copies&&!legacy){
-      if(!initialized)this.store.transaction(()=>{this.store.db.exec('DROP TRIGGER IF EXISTS dm_au;'+UPDATE_TRIGGER+' PRAGMA user_version=2;');this.store.setState(COMPRESSION_STATE,1);this.store.setState(PACKED_STATE,1);});
-      else if(this.store.getState(PACKED_STATE,0)!==1){this.store.compact();this.store.setState(PACKED_STATE,1);}
+      if(!initialized){stage='archive.initialize';this.store.transaction(()=>{this.store.db.exec('DROP TRIGGER IF EXISTS dm_au;'+UPDATE_TRIGGER+' PRAGMA user_version=2;');this.store.setState(COMPRESSION_STATE,1);this.store.setState(PACKED_STATE,1);});}
+      else if(this.store.getState(PACKED_STATE,0)!==1){stage='archive.compact';this.store.compact();stage='archive.mark';this.store.setState(PACKED_STATE,1);}
       return {removedCopies:0,backup:null};
     }
-    const backup=await this.store.backup({force:true});
+    stage='archive.backup';const backup=await this.store.backup({force:true});
     if(this.store.filename!==':memory:'&&!backup)fail(500,'BACKUP_REQUIRED','Archive migration requires a verified backup');
-    const removedCopies=this.store.transaction(()=>{
+    stage='archive.compress';const removedCopies=this.store.transaction(()=>{
       const removed=this.store.db.prepare(`DELETE FROM discord_message_versions AS v WHERE ${duplicate}`).run().changes;
       if(!initialized){
         this.store.db.exec('DROP TRIGGER IF EXISTS dm_au;'+UPDATE_TRIGGER);
@@ -67,8 +69,9 @@ class DiscordBridge {
       this.store.setState(PACKED_STATE,0);
       return removed;
     });
-    this.store.compact();this.store.setState(PACKED_STATE,1);
+    stage='archive.compact';this.store.compact();stage='archive.mark';this.store.setState(PACKED_STATE,1);
     return {removedCopies,backup};
+    }catch(e){if(e&&typeof e==='object')e.startupStage=stage;throw e;}
   }
   checkGuild(id){snowflake(id);if(!this.cfg.guildIds.includes(id))fail(403,'GUILD_FORBIDDEN','Guild is not selected');}
   enabled(){if(this.cfg.discordMode!=='vencord')fail(409,'DISCORD_TRANSPORT','Select DISCORD_AUTH_MODE=vencord');}

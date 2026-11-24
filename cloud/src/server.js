@@ -109,6 +109,17 @@ function createApp({cfg=loadConfig(),store,httpClient,relay,forum,discord,knowle
   return {cfg,store,auth,service,forum,discord,knowledge,scheduler,relay,server,handler,close,start:async()=>{await discordBridge.prepareStorage();return new Promise((resolve,reject)=>{server.once('error',reject);server.listen(cfg.port,cfg.host,()=>{server.removeListener('error',reject);if(cfg.schedulerEnabled)scheduler.start();resolve(server.address());});});}};
 }
 async function bodyJson(req,max){if(!/^application\/json(?:;|$)/i.test(req.headers['content-type']||''))fail(415,'JSON_REQUIRED','Expected application/json');const raw=await readBody(req,max);try{const body=JSON.parse(raw||'{}');if(!body||typeof body!=='object'||Array.isArray(body))throw Error();return body;}catch{fail(400,'JSON_INVALID','Invalid JSON object');}}
-function run(){let app;try{app=createApp();app.start().then(()=>console.log(JSON.stringify({event:'started',port:app.cfg.port,host:app.cfg.host}))).catch(e=>{console.error(JSON.stringify({event:'startup_failed',code:e.code||'STARTUP_ERROR'}));process.exitCode=1;app.close().catch(()=>{});});for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>{const timer=setTimeout(()=>process.exit(1),15000);timer.unref();app.close().then(()=>clearTimeout(timer)).catch(()=>{process.exitCode=1;});});return app;}catch(e){console.error(JSON.stringify({event:'configuration_error',code:e.code||'CONFIG_ERROR',message:e.code==='CONFIG'?e.message:'Check configuration and Node.js version'}));process.exitCode=1;}}
+function startupFailure(e,cfg={}){
+  const result={event:'startup_failed',code:/^[A-Z0-9_]{1,80}$/.test(e?.code||'')?e.code:'STARTUP_ERROR'};
+  if(/^archive\.(inspect|initialize|backup|compress|compact|mark)$/.test(e?.startupStage||''))result.stage=e.startupStage;
+  if(Number.isInteger(e?.errcode))result.sqliteCode=e.errcode;
+  if(result.code.startsWith('ERR_SQLITE')&&typeof e?.message==='string'){
+    let message=e.message;
+    for(const key of ['readToken','writeToken','executorToken','discordBridgeToken','discordToken','oauthSecret','ownerPassword'])if(typeof cfg[key]==='string'&&cfg[key])message=message.split(cfg[key]).join('[redacted]');
+    result.message=message.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300);
+  }
+  return result;
+}
+function run(){let app;try{app=createApp();app.start().then(()=>console.log(JSON.stringify({event:'started',port:app.cfg.port,host:app.cfg.host}))).catch(e=>{console.error(JSON.stringify(startupFailure(e,app.cfg)));process.exitCode=1;app.close().catch(()=>{});});for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>{const timer=setTimeout(()=>process.exit(1),15000);timer.unref();app.close().then(()=>clearTimeout(timer)).catch(()=>{process.exitCode=1;});});return app;}catch(e){console.error(JSON.stringify({event:'configuration_error',code:e.code||'CONFIG_ERROR',message:e.code==='CONFIG'?e.message:'Check configuration and Node.js version'}));process.exitCode=1;}}
 if(require.main===module)run();
-module.exports={createApp,ROUTES,openapi,bodyJson,readBody,run};
+module.exports={createApp,ROUTES,openapi,bodyJson,readBody,run,startupFailure};
