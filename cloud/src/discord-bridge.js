@@ -1,7 +1,11 @@
 'use strict';
 // Persistent, paginated imports. The host never authenticates to Discord in this transport.
 const {fail,hash,token,equal,snowflake,text,integer,page,envelope}=require('./util');
+const {encodeBody,decodeBody}=require('./discord-body');
 const MESSAGE_TYPES=new Set([0,2,5,10,11,12,13]);
+const COMPRESSION_STATE='discordBodyCompressionV1';
+const PACKED_STATE='discordBodyPackedV1';
+const UPDATE_TRIGGER="CREATE TRIGGER IF NOT EXISTS dm_au AFTER UPDATE OF text ON discord_messages WHEN old.text IS NOT new.text BEGIN INSERT INTO discord_messages_fts(discord_messages_fts,rowid,text) VALUES('delete',old.id,old.text); INSERT INTO discord_messages_fts(rowid,text) VALUES(new.id,new.text); END;";
 const compare=(a,b)=>a.length-b.length||a.localeCompare(b);
 const stamp=()=>new Date().toISOString();
 function list(value,max=100){if(!Array.isArray(value)||value.length>max)fail(422,'EXPORT_FORMAT','Invalid batch size');return value;}
@@ -34,17 +38,36 @@ class DiscordBridge {
       CREATE VIRTUAL TABLE IF NOT EXISTS discord_messages_fts USING fts5(text,content=discord_messages,content_rowid=id,tokenize='unicode61 remove_diacritics 2');
       CREATE TRIGGER IF NOT EXISTS dm_ai AFTER INSERT ON discord_messages BEGIN INSERT INTO discord_messages_fts(rowid,text) VALUES(new.id,new.text); END;
       CREATE TRIGGER IF NOT EXISTS dm_ad AFTER DELETE ON discord_messages BEGIN INSERT INTO discord_messages_fts(discord_messages_fts,rowid,text) VALUES('delete',old.id,old.text); END;
-      CREATE TRIGGER IF NOT EXISTS dm_au AFTER UPDATE OF text ON discord_messages BEGIN INSERT INTO discord_messages_fts(discord_messages_fts,rowid,text) VALUES('delete',old.id,old.text); INSERT INTO discord_messages_fts(rowid,text) VALUES(new.id,new.text); END;
+      ${UPDATE_TRIGGER}
     `);
   }
   async prepareStorage(){
-    // The old layout copied every current body into the versions table as well.
-    // Remove only byte-for-byte duplicates after a separately verified backup.
+    // Retain an independently verified backup before changing existing archive bodies.
     const duplicate='EXISTS (SELECT 1 FROM discord_messages m WHERE m.id=v.message_row AND m.version=v.version AND m.body=v.body AND m.changed_at=v.at)';
-    if(!this.store.db.prepare(`SELECT 1 FROM discord_message_versions v WHERE ${duplicate} LIMIT 1`).get())return {removedCopies:0,backup:null};
+    const copies=!!this.store.db.prepare(`SELECT 1 FROM discord_message_versions v WHERE ${duplicate} LIMIT 1`).get();
+    const initialized=this.store.getState(COMPRESSION_STATE,0)===1;
+    const legacy=!initialized&&(this.store.db.prepare("SELECT 1 FROM discord_messages WHERE typeof(body)='text' LIMIT 1").get()||this.store.db.prepare("SELECT 1 FROM discord_message_versions WHERE typeof(body)='text' LIMIT 1").get());
+    if(!copies&&!legacy){
+      if(!initialized)this.store.transaction(()=>{this.store.db.exec('DROP TRIGGER IF EXISTS dm_au;'+UPDATE_TRIGGER+' PRAGMA user_version=2;');this.store.setState(COMPRESSION_STATE,1);this.store.setState(PACKED_STATE,1);});
+      else if(this.store.getState(PACKED_STATE,0)!==1){this.store.compact();this.store.setState(PACKED_STATE,1);}
+      return {removedCopies:0,backup:null};
+    }
     const backup=await this.store.backup({force:true});
-    if(this.store.filename!==':memory:'&&!backup)fail(500,'BACKUP_REQUIRED','Duplicate compaction requires a verified backup');
-    const removedCopies=this.store.transaction(()=>this.store.db.prepare(`DELETE FROM discord_message_versions AS v WHERE ${duplicate}`).run().changes);
+    if(this.store.filename!==':memory:'&&!backup)fail(500,'BACKUP_REQUIRED','Archive migration requires a verified backup');
+    const removedCopies=this.store.transaction(()=>{
+      const removed=this.store.db.prepare(`DELETE FROM discord_message_versions AS v WHERE ${duplicate}`).run().changes;
+      if(!initialized){
+        this.store.db.exec('DROP TRIGGER IF EXISTS dm_au;'+UPDATE_TRIGGER);
+        const current=this.store.db.prepare("SELECT id,body FROM discord_messages WHERE id>? AND typeof(body)='text' ORDER BY id LIMIT 20"),update=this.store.db.prepare('UPDATE discord_messages SET body=? WHERE id=?');
+        let id=0,rows;while((rows=current.all(id)).length){for(const row of rows){const encoded=encodeBody(row.body);if(typeof encoded!=='string')update.run(encoded,row.id);}id=rows.at(-1).id;}
+        const previous=this.store.db.prepare("SELECT message_row,version,body FROM discord_message_versions WHERE (message_row>? OR (message_row=? AND version>?)) AND typeof(body)='text' ORDER BY message_row,version LIMIT 20"),updatePrevious=this.store.db.prepare('UPDATE discord_message_versions SET body=? WHERE message_row=? AND version=?');
+        let messageRow=0,version=0;while((rows=previous.all(messageRow,messageRow,version)).length){for(const row of rows){const encoded=encodeBody(row.body);if(typeof encoded!=='string')updatePrevious.run(encoded,row.message_row,row.version);}const last=rows.at(-1);messageRow=last.message_row;version=last.version;}
+        this.store.db.exec('PRAGMA user_version=2;');this.store.setState(COMPRESSION_STATE,1);
+      }
+      this.store.setState(PACKED_STATE,0);
+      return removed;
+    });
+    this.store.compact();this.store.setState(PACKED_STATE,1);
     return {removedCopies,backup};
   }
   checkGuild(id){snowflake(id);if(!this.cfg.guildIds.includes(id))fail(403,'GUILD_FORBIDDEN','Guild is not selected');}
@@ -163,7 +186,7 @@ class DiscordBridge {
     if(old&&(Date.parse(old.source_at)>Date.parse(sourceAt)||(old.deleted_at&&started&&old.deleted_at>started))){if(run)db.prepare('UPDATE discord_messages SET seen_run=? WHERE id=?').run(run,old.id);return;}
     const version=old?old.version+(old.hash!==checksum?1:0):1;
     if(old&&old.hash!==checksum)db.prepare('INSERT OR IGNORE INTO discord_message_versions VALUES(?,?,?,?)').run(old.id,old.version,old.body,old.changed_at);
-    db.prepare('INSERT INTO discord_messages(guild_id,channel_id,message_id,body,text,hash,version,checked_at,changed_at,source_at,seen_run,pinned) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(guild_id,channel_id,message_id) DO UPDATE SET body=excluded.body,text=CASE WHEN hash<>excluded.hash THEN excluded.text ELSE text END,hash=excluded.hash,version=excluded.version,checked_at=excluded.checked_at,changed_at=CASE WHEN hash<>excluded.hash THEN excluded.changed_at ELSE changed_at END,source_at=excluded.source_at,seen_run=CASE WHEN excluded.seen_run<>'+"''"+' THEN excluded.seen_run ELSE seen_run END,pinned=excluded.pinned,deleted_at=NULL').run(guildId,channelId,m.id,body,searchable(m),checksum,version,now,now,sourceAt,run,pinned?1:0);
+    db.prepare('INSERT INTO discord_messages(guild_id,channel_id,message_id,body,text,hash,version,checked_at,changed_at,source_at,seen_run,pinned) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(guild_id,channel_id,message_id) DO UPDATE SET body=excluded.body,text=CASE WHEN hash<>excluded.hash THEN excluded.text ELSE text END,hash=excluded.hash,version=excluded.version,checked_at=excluded.checked_at,changed_at=CASE WHEN hash<>excluded.hash THEN excluded.changed_at ELSE changed_at END,source_at=excluded.source_at,seen_run=CASE WHEN excluded.seen_run<>'+"''"+' THEN excluded.seen_run ELSE seen_run END,pinned=excluded.pinned,deleted_at=NULL').run(guildId,channelId,m.id,old?.hash===checksum?old.body:encodeBody(body),searchable(m),checksum,version,now,now,sourceAt,run,pinned?1:0);
     if(old&&old.hash!==checksum)db.prepare('DELETE FROM discord_message_versions WHERE message_row=? AND version<?').run(old.id,version-this.cfg.historyVersions+1);
   }
   events({guildId,channelId,items}){
@@ -177,10 +200,10 @@ class DiscordBridge {
     const active=this.store.db.prepare("SELECT id,mode,state,error,updated_at FROM discord_exports WHERE guild_id=? AND state='running' ORDER BY created_at LIMIT 1").get(guildId);
     const lastDataAt=this.store.db.prepare('SELECT max(checked_at) at FROM discord_channels WHERE guild_id=?').get(guildId).at||null;
     const {dbBytes,maxDbBytes}=this.store.stats(),reusableBytes=this.store.db.prepare('PRAGMA freelist_count').get().freelist_count*this.store.db.prepare('PRAGMA page_size').get().page_size;
-    return {guildId,bridgeOnline:this.online(),historyComplete:!!job&&job.state==='complete'&&!incomplete,oldEditsVerified:!!job&&job.mode==='full'&&job.state==='complete',job:job?{id:job.id,mode:job.mode,state:job.state,createdAt:job.created_at,updatedAt:job.updated_at,error:job.error,discoveryIssues:JSON.parse(job.issues),channelErrors:this.store.db.prepare("SELECT channel_id,error FROM discord_export_channels WHERE job_id=? AND state='error' LIMIT 50").all(job.id)}:null,activeJob:active?{id:active.id,mode:active.mode,state:active.state,error:active.error,updatedAt:active.updated_at}:null,lastDataAt,storage:{dbBytes,maxDbBytes,reusableBytes},channels:envelope(channels,offset,limit),messageCount:this.store.db.prepare('SELECT count(*) n FROM discord_messages WHERE guild_id=? AND deleted_at IS NULL').get(guildId).n,untrusted:true};
+    return {guildId,bridgeOnline:this.online(),historyComplete:!!job&&job.state==='complete'&&!incomplete,oldEditsVerified:!!job&&job.mode==='full'&&job.state==='complete',job:job?{id:job.id,mode:job.mode,state:job.state,createdAt:job.created_at,updatedAt:job.updated_at,error:job.error,discoveryIssues:JSON.parse(job.issues),channelErrors:this.store.db.prepare("SELECT channel_id,error FROM discord_export_channels WHERE job_id=? AND state='error' LIMIT 50").all(job.id)}:null,activeJob:active?{id:active.id,mode:active.mode,state:active.state,error:active.error,updatedAt:active.updated_at}:null,lastDataAt,storage:{dbBytes,maxDbBytes,reusableBytes,quotaRemainingBytes:Math.max(0,maxDbBytes-dbBytes+reusableBytes),bodyEncoding:'deflate-v1',compressionMigrated:this.store.getState(COMPRESSION_STATE,0)===1&&this.store.getState(PACKED_STATE,0)===1},channels:envelope(channels,offset,limit),messageCount:this.store.db.prepare('SELECT count(*) n FROM discord_messages WHERE guild_id=? AND deleted_at IS NULL').get(guildId).n,untrusted:true};
   }
   structure(guildId,args={}){this.checkGuild(guildId);const {limit,offset}=page(args),row=this.store.db.prepare('SELECT * FROM discord WHERE guild_id=?').get(guildId);if(!row)fail(404,'DISCORD_NOT_SYNCED','No client export yet');return {guild:JSON.parse(row.body).guild,channels:envelope(this.store.db.prepare('SELECT body FROM discord_channels WHERE guild_id=? AND present=1 ORDER BY id LIMIT ? OFFSET ?').all(guildId,limit+1,offset).map(c=>{const x=JSON.parse(c.body);return {...x,parentId:x.parent_id,permissionOverwrites:x.permission_overwrites};}),offset,limit),version:row.version,checkedAt:row.checked_at,untrusted:true};}
-  output(row){return {...JSON.parse(row.body),version:row.version,checkedAt:row.checked_at,changedAt:row.changed_at,pinned:!!row.pinned,deleted:!!row.deleted_at,url:`https://discord.com/channels/${row.guild_id}/${row.channel_id}/${row.message_id}`};}
+  output(row){return {...JSON.parse(decodeBody(row.body)),version:row.version,checkedAt:row.checked_at,changedAt:row.changed_at,pinned:!!row.pinned,deleted:!!row.deleted_at,url:`https://discord.com/channels/${row.guild_id}/${row.channel_id}/${row.message_id}`};}
   messages(guildId,channelId,args={}){
     this.channel(guildId,channelId);const {limit,offset}=page(args),values=[guildId,channelId];let cursor='';
     if(args.beforeId){snowflake(args.beforeId);if(offset)fail(422,'EXPORT_CURSOR','Use beforeId or offset, not both');cursor='AND (length(message_id)<? OR (length(message_id)=? AND message_id<?))';values.push(args.beforeId.length,args.beforeId.length,args.beforeId);}
@@ -196,7 +219,11 @@ class DiscordBridge {
     const rows=this.store.db.prepare(`SELECT m.* FROM discord_messages_fts JOIN discord_messages m ON m.id=discord_messages_fts.rowid JOIN discord_channels c ON c.guild_id=m.guild_id AND c.id=m.channel_id WHERE discord_messages_fts MATCH ? AND m.guild_id=? AND m.deleted_at IS NULL AND c.present=1 ${filter} ORDER BY bm25(discord_messages_fts) LIMIT ? OFFSET ?`).all(...values,limit+1,offset);
     return {...envelope(rows.map(r=>this.output(r)),offset,limit),untrusted:true};
   }
-  history(guildId,channelId,messageId,args={}){this.channel(guildId,channelId);snowflake(messageId);const {limit,offset}=page(args);return {...envelope(this.store.db.prepare('WITH current AS (SELECT * FROM discord_messages WHERE guild_id=? AND channel_id=? AND message_id=?) SELECT v.version,v.body,v.at FROM discord_message_versions v JOIN current m ON m.id=v.message_row UNION SELECT version,body,changed_at AS at FROM current ORDER BY version DESC LIMIT ? OFFSET ?').all(guildId,channelId,messageId,limit+1,offset).map(r=>({version:r.version,at:r.at,message:JSON.parse(r.body)})),offset,limit),untrusted:true};}
+  history(guildId,channelId,messageId,args={}){
+    this.channel(guildId,channelId);snowflake(messageId);const {limit,offset}=page(args),seen=new Set();
+    const rows=this.store.db.prepare('WITH current AS (SELECT * FROM discord_messages WHERE guild_id=? AND channel_id=? AND message_id=?) SELECT v.version,v.body,v.at FROM discord_message_versions v JOIN current m ON m.id=v.message_row UNION ALL SELECT version,body,changed_at AS at FROM current ORDER BY version DESC').all(guildId,channelId,messageId).map(r=>({...r,body:decodeBody(r.body)})).filter(r=>{const key=JSON.stringify([r.version,r.at,r.body]);if(seen.has(key))return false;seen.add(key);return true;});
+    return {...envelope(rows.slice(offset,offset+limit+1).map(r=>({version:r.version,at:r.at,message:JSON.parse(r.body)})),offset,limit),untrusted:true};
+  }
   maintain(){this.store.db.prepare("DELETE FROM discord_exports WHERE state NOT IN ('queued','running') AND id NOT IN (SELECT id FROM discord_exports ORDER BY created_at DESC LIMIT 100)").run();}
 }
 module.exports={DiscordBridge,message,searchable,MESSAGE_TYPES};

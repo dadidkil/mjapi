@@ -18,8 +18,8 @@ class Store {
   }
   migrate() {
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 1) fail(500,'DB_VERSION','Database was created by a newer application');
-    if (version === 1) return;
+    if (version > 2) fail(500,'DB_VERSION','Database was created by a newer application');
+    if (version >= 1) return;
     this.db.exec(`BEGIN IMMEDIATE;
       CREATE TABLE documents(id TEXT PRIMARY KEY,source_id TEXT NOT NULL,title TEXT NOT NULL,category TEXT NOT NULL,server TEXT NOT NULL,organization TEXT NOT NULL DEFAULT '',source TEXT NOT NULL,source_url TEXT NOT NULL,body TEXT NOT NULL,published_at TEXT,checked_at TEXT NOT NULL,changed_at TEXT NOT NULL,hash TEXT NOT NULL,version INTEGER NOT NULL,source_version TEXT);
       CREATE INDEX documents_scope ON documents(server,organization,category);
@@ -129,6 +129,14 @@ class Store {
     const target=path.join(directory,`workspace-${Date.now()}.sqlite`);await backup(this.db,target);
     const check=new DatabaseSync(target,{readOnly:true});try{if(check.prepare('PRAGMA quick_check').get().quick_check!=='ok')fail(500,'BACKUP_CHECK','Backup integrity check failed');}finally{check.close();}
     const files=fs.readdirSync(directory).filter(x=>/^workspace-\d+\.sqlite$/.test(x)).sort().reverse();for(const f of files.slice(Math.max(1,this.cfg.backupCount)))fs.unlinkSync(path.join(directory,f));return target;
+  }
+  compact() {
+    // Repack free space inside leaf pages as well as released overflow pages.
+    // Keep VACUUM's temporary database off the process's memory budget.
+    const temp=this.db.prepare('PRAGMA temp_store').get().temp_store,limit=this.db.prepare('PRAGMA max_page_count').get().max_page_count;
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA temp_store=FILE;');
+    try { this.db.exec('VACUUM; PRAGMA wal_checkpoint(TRUNCATE);'); }
+    finally { this.db.exec(`PRAGMA temp_store=${temp}; PRAGMA max_page_count=${limit};`); }
   }
   close() {this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');this.db.close();}
 }
