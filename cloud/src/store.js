@@ -42,7 +42,15 @@ class Store {
       PRAGMA user_version=1; COMMIT;`);
     this.db.exec(`PRAGMA max_page_count=${Math.floor(this.cfg.maxDbBytes/4096)};`);
   }
-  transaction(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const result = fn(); this.db.exec('COMMIT'); return result; } catch(e) { this.db.exec('ROLLBACK'); throw e; } }
+  transaction(fn) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try { const result = fn(); this.db.exec('COMMIT'); return result; }
+    catch(e) {
+      // SQLITE_FULL can roll back automatically. Never hide its cause with a second rollback.
+      try { if(this.db.isTransaction)this.db.exec('ROLLBACK'); } catch { /* Preserve the original write error. */ }
+      throw e;
+    }
+  }
   getState(key, fallback = null) { const v = this.db.prepare('SELECT value FROM state WHERE key=?').get(key); return v ? JSON.parse(v.value) : fallback; }
   setState(key, value) { this.db.prepare('INSERT INTO state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,JSON.stringify(value)); }
   audit(event,actor,entity='',outcome='ok') { this.db.prepare('INSERT INTO audit(at,event,actor,entity_id,outcome) VALUES(?,?,?,?,?)').run(new Date().toISOString(),event,actor,entity,outcome); }
@@ -115,12 +123,12 @@ class Store {
     this.db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA optimize;');
   }
   stats() { return {documents:this.db.prepare('SELECT count(*) n FROM documents').get().n,versions:this.db.prepare('SELECT count(*) n FROM versions').get().n,dbBytes:this.db.prepare('PRAGMA page_count').get().page_count*this.db.prepare('PRAGMA page_size').get().page_size,maxDbBytes:this.cfg.maxDbBytes}; }
-  async backup() {
-    if(!this.cfg.backupCount||this.filename===':memory:')return null;
+  async backup({force=false}={}) {
+    if((!force&&!this.cfg.backupCount)||this.filename===':memory:')return null;
     const directory=path.join(this.cfg.dataDir,'backups');fs.mkdirSync(directory,{recursive:true,mode:0o700});
     const target=path.join(directory,`workspace-${Date.now()}.sqlite`);await backup(this.db,target);
     const check=new DatabaseSync(target,{readOnly:true});try{if(check.prepare('PRAGMA quick_check').get().quick_check!=='ok')fail(500,'BACKUP_CHECK','Backup integrity check failed');}finally{check.close();}
-    const files=fs.readdirSync(directory).filter(x=>/^workspace-\d+\.sqlite$/.test(x)).sort().reverse();for(const f of files.slice(this.cfg.backupCount))fs.unlinkSync(path.join(directory,f));return target;
+    const files=fs.readdirSync(directory).filter(x=>/^workspace-\d+\.sqlite$/.test(x)).sort().reverse();for(const f of files.slice(Math.max(1,this.cfg.backupCount)))fs.unlinkSync(path.join(directory,f));return target;
   }
   close() {this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');this.db.close();}
 }

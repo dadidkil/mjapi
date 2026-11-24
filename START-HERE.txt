@@ -1,14 +1,20 @@
-Majestic Discord Bridge - Wispbyte
+Majestic Discord Bridge — 24.11.2026
 
-Upload and extract files in /home/container.
-The default node /home/container/index.js startup is supported.
-Hosting instructions: cloud/docs/wispbyte.md
-Vencord setup: cloud/docs/discord-vencord.md
-Create .env from .env.example and configure private application credentials.
-Destination: https://apimjd.wispbyte.app (without :15377).
-Health: https://apimjd.wispbyte.app/health
-MCP: https://apimjd.wispbyte.app/mcp
-Selected guilds: 1317165120128028773, 1525821262054817842.
+Адрес приложения: https://apimjd.wispbyte.app (без :15377).
+Выбраны только 1317165120128028773 и 1525821262054817842.
 
-Source code only. Install the custom Vencord build separately.
-No credentials, database, or live Discord data are included.
+Обновление действующего сервера:
+cloud/docs/discord-storage-fix.md — порядок замены трёх модулей.
+Сохраните прежние файлы перед заменой; не заменяйте .env и базу.
+Установку SQLite на Wispbyte проверять отдельно от обновления GitHub.
+На старте новая версия проверяет backup перед очисткой точных дублей.
+
+Новая установка:
+Распаковать в /home/container; штатный index.js поддерживается.
+cloud/docs/wispbyte.md — настройка хостинга.
+cloud/docs/discord-vencord.md — настройка плагина и MCP.
+cloud/docs/discord-validation.md — результаты и пределы проверок.
+Для новой установки: node cloud/scripts/setup.js; личный .env загружается отдельно.
+
+Проверка: 77 тестов, 76 успешно, 0 ошибок, 1 пропущен; 40 файлов синтаксиса, 25 путей OpenAPI.
+Выпуск не содержит ключей, cookie, базы, живых сообщений и резервных копий.
