@@ -1,0 +1,6 @@
+[
+  {"id":"laws-houston","type":"docossum","server":"houston","intervalSeconds":900},
+  {"id":"laws-miami","type":"docossum","server":"miami","intervalSeconds":900},
+  {"id":"ems-houston-charter","type":"forum_thread","server":"houston","organization":"EMS","category":"charter","threadId":3734736,"maxPages":3,"enabled":false},
+  {"id":"project-rules-example","type":"http","server":"project","category":"project_rules","url":"https://forum.majestic-rp.ru/","selector":".bbWrapper","enabled":false}
+]

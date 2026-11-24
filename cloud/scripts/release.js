@@ -1,0 +1,10 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),zlib=require('node:zlib'),crypto=require('node:crypto');
+const ROOT=path.resolve(__dirname,'../..');
+const EXACT=['index.js','package.json','package-lock.json','.env.example','cloud/config/sources.example.json','cloud/config/discord-guilds.json','cloud/config/.gitignore','tools/laws.js','tools/laws-sync.js','majestic-forum-api/lib/parse.js','majestic-forum-api/lib/markdown.js','majestic-forum-api/lib/thread-markdown.js','majestic-forum-api/lib/request-gate.js'];
+function files(){const out=[...EXACT];for(const dir of ['cloud/src','cloud/scripts','cloud/test','cloud/docs','integrations/vencord/majesticWorkspace']){for(const e of fs.readdirSync(path.join(ROOT,dir),{withFileTypes:true})){if(!e.isDirectory()&&!e.name.endsWith('.bak'))out.push(dir+'/'+e.name);}}return out.sort();}
+function header(name,size){if(Buffer.byteLength(name)>100)throw Error('Tar path too long');const b=Buffer.alloc(512);b.write(name);b.write('0000644\0',100);b.write('0000000\0',108);b.write('0000000\0',116);b.write(size.toString(8).padStart(11,'0')+'\0',124);b.write('00000000000\0',136);b.fill(32,148,156);b[156]=48;b.write('ustar\0',257);b.write('00',263);const sum=b.reduce((a,x)=>a+x,0);b.write(sum.toString(8).padStart(6,'0')+'\0 ',148);return b;}
+function main(){const output=path.join(ROOT,'.runtime');fs.mkdirSync(output,{recursive:true});const parts=[],list=files(),manifest=[];
+for(const name of list){const data=fs.readFileSync(path.join(ROOT,name));parts.push(header(name,data.length),data,Buffer.alloc((512-data.length%512)%512));manifest.push({path:name,bytes:data.length,sha256:crypto.createHash('sha256').update(data).digest('hex')});}
+parts.push(Buffer.alloc(1024));const archive=path.join(output,'majestic-workspace-cloud.tar.gz');fs.writeFileSync(archive,zlib.gzipSync(Buffer.concat(parts),{level:9}));fs.writeFileSync(path.join(output,'cloud-release-manifest.json'),JSON.stringify(manifest,null,2)+'\n');console.log(JSON.stringify({archive,files:list.length,bytes:fs.statSync(archive).size}));}
+if(require.main===module)main();module.exports={files,header};

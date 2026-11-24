@@ -1,0 +1,34 @@
+{
+  "name": "majestic-workspace-cloud",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Lightweight Majestic Workspace REST and remote MCP service",
+  "main": "index.js",
+  "engines": { "node": ">=24.18.0 <25 || >=26 <27" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --max-old-space-size=256 cloud/src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch cloud/src/server.js",
+    "test": "node --test cloud/test/*.test.js",
+    "test:local": "node tools/workspace.js test",
+    "check": "node cloud/scripts/check.js",
+    "backup": "node --env-file-if-exists=.env cloud/scripts/backup.js",
+    "executor": "node --env-file-if-exists=.env cloud/scripts/local-executor.js",
+    "discord:export": "node cloud/scripts/discord-request.js",
+    "benchmark": "node --expose-gc cloud/scripts/benchmark.js",
+    "release": "node cloud/scripts/release.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7",
+    "cheerio": "1.2.0",
+    "turndown": "7.2.4",
+    "turndown-plugin-gfm": "1.0.2"
+  },
+  "files": [
+    "index.js", "cloud/src", "cloud/scripts", "cloud/config/sources.example.json", "cloud/docs", "cloud/test",
+    "tools/laws-sync.js", "tools/laws.js", "integrations/vencord/majesticWorkspace", "cloud/config/discord-guilds.json",
+    "majestic-forum-api/lib/parse.js", "majestic-forum-api/lib/markdown.js",
+    "majestic-forum-api/lib/thread-markdown.js", "majestic-forum-api/lib/request-gate.js",
+    ".env.example"
+  ]
+}

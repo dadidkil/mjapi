@@ -1,0 +1,14 @@
+Majestic Discord Bridge - Wispbyte
+
+Upload and extract files in /home/container.
+The default node /home/container/index.js startup is supported.
+Hosting instructions: cloud/docs/wispbyte.md
+Vencord setup: cloud/docs/discord-vencord.md
+Create .env from .env.example and configure private application credentials.
+Destination: https://apimjd.wispbyte.app (without :15377).
+Health: https://apimjd.wispbyte.app/health
+MCP: https://apimjd.wispbyte.app/mcp
+Selected guilds: 1317165120128028773, 1525821262054817842.
+
+Source code only. Install the custom Vencord build separately.
+No credentials, database, or live Discord data are included.
